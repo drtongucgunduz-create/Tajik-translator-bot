@@ -1,5 +1,6 @@
 import os
 import json
+import asyncio
 
 from aiohttp import web
 from google import genai
@@ -9,7 +10,10 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-flash-latest")
+MODELS = [m.strip() for m in os.getenv(
+    "GEMINI_MODELS",
+    "gemini-3.5-flash,gemini-3.6-flash,gemini-3.5-flash-lite,gemini-3.1-flash-lite,gemini-flash-latest",
+).split(",") if m.strip()]
 BOT_MODE = os.getenv("BOT_MODE", "polling")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL") or os.getenv("RENDER_EXTERNAL_URL", "")
 PORT = int(os.getenv("PORT", "10000"))
@@ -33,12 +37,23 @@ def keys_for(mode: str) -> str:
 
 
 async def ask_gemini(parts) -> dict:
-    resp = await client.aio.models.generate_content(
-        model=GEMINI_MODEL,
-        contents=parts,
-        config=types.GenerateContentConfig(temperature=0, response_mime_type="application/json"),
-    )
-    return json.loads(resp.text)
+    """Try each model; on overload/rate-limit errors move to the next one."""
+    cfg = types.GenerateContentConfig(temperature=0, response_mime_type="application/json")
+    last_err = None
+    for attempt in range(2):
+        for model in MODELS:
+            try:
+                resp = await client.aio.models.generate_content(model=model, contents=parts, config=cfg)
+                return json.loads(resp.text)
+            except Exception as e:
+                msg = str(e)
+                last_err = e
+                if any(k in msg for k in ("503", "UNAVAILABLE", "429", "RESOURCE_EXHAUSTED", "404", "NOT_FOUND", "500", "INTERNAL")):
+                    print(f"{model} failed: {msg[:120]}")
+                    continue
+                raise
+        await asyncio.sleep(3)
+    raise RuntimeError("Gemini şu an çok yoğun, lütfen biraz sonra tekrar deneyin.") from last_err
 
 
 async def translate_text(text: str, mode: str) -> dict:
@@ -127,7 +142,7 @@ def run_webhook():
         await ptb.initialize()
         await ptb.start()
         await ptb.bot.set_webhook(url=f"{WEBHOOK_URL.rstrip('/')}{path}", secret_token=SECRET_TOKEN)
-        print("Webhook set")
+        print("Webhook set", flush=True)
 
     async def on_shutdown(_):
         await ptb.stop()
