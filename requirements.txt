@@ -1,0 +1,3 @@
+python-telegram-bot==21.*
+google-genai>=1.0
+aiohttp>=3.9
